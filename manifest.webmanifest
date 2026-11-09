@@ -1,0 +1,1 @@
+{"background_color":"#fffaf0","description":"实时收音跟谱：逐音判定音准、快慢与时值，并生成练习报告。","display":"standalone","icons":[{"sizes":"192x192","src":"icon-192.png","type":"image/png"},{"purpose":"any","sizes":"512x512","src":"icon-512.png","type":"image/png"}],"lang":"zh-CN","name":"钢琴跟谱练习","orientation":"any","scope":".","short_name":"钢琴跟谱","start_url":".","theme_color":"#fffaf0"}
