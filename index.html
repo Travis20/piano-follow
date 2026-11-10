@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <link rel="manifest" href="manifest.webmanifest">
-<title>钢琴跟谱练习分析 v55（双手）</title>
+<title>钢琴跟谱练习分析 v56（双手）</title>
 <style>
 :root{--ink:#22201d;--paper:#fffaf0;--line:#e3d7c3;--blue:#2563eb;--green:#15803d;--red:#dc2626;--amber:#d97706;--violet:#7c3aed;--teal:#0f766e}
 *{box-sizing:border-box}body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--paper);color:var(--ink)}
@@ -1455,26 +1455,76 @@ function buildDemoWav(){
 const HQ_DYN_VEL={pp:36,p:50,mp:63,mf:76,f:92,ff:108};
 let hqIndex=null,hqLoadPromise=null;const hqPacks={};
 let demoBeatMap=null; /* seconds at integer beats for the current demo WAV (HQ stretch map), null = constant tempo */
+/* v56: sample sources in priority order — same folder first (web version),
+   then the app's own GitHub Pages site, so the local single-file copy can
+   reach the same packs when the app preview allows internet access
+   (GitHub Pages serves Access-Control-Allow-Origin: *). */
+let HQ_BASES=["","https://travis20.github.io/piano-follow/"];
+let hqBase=null;
 function loadHqIndex(){
   if(hqIndex)return Promise.resolve(hqIndex);
   if(!hqLoadPromise)hqLoadPromise=(async()=>{
-    try{
-      const r=await fetch("hq-index.json");
-      if(!r.ok)return null;
-      const j=await r.json();
-      if(!j||!j.items||!j.layers)return null;
-      hqIndex=j;return j;
-    }catch(e){return null;}
+    for(const base of HQ_BASES){
+      try{
+        const r=await fetch(base+"hq-index.json");
+        if(!r.ok)continue;
+        const j=await r.json();
+        if(!j||!j.items||!j.layers)continue;
+        hqIndex=j;hqBase=base;return j;
+      }catch(e){/* try the next source */}
+    }
+    return null;
   })();
   return hqLoadPromise.then(j=>{if(!j)hqLoadPromise=null;return j;});
 }
 async function loadHqPack(name){
   if(hqPacks[name])return hqPacks[name];
-  const r=await fetch("hq-pack-"+name+".bin");
+  if(hqBase==null)await loadHqIndex();
+  const r=await fetch((hqBase||"")+"hq-pack-"+name+".bin");
   if(!r.ok)throw new Error("hq pack "+name+" "+r.status);
   const ab=await r.arrayBuffer();
   if(ab.byteLength<1000000)throw new Error("hq pack too small");
   hqPacks[name]=ab;return ab;
+}
+/* v56 fallback for the local copy when the packs cannot be fetched at all
+   (app preview blocks downloads): for the five FINALIZED library songs, at
+   their standard tempo, with expressive dynamics and both hands, play the
+   offline B recording itself from the Pages site through the player (the
+   route proven audible in the preview). The B renders were made with the
+   same performance rules, so the stretch beat map keeps the staff
+   highlight in sync. Any other setting (changed tempo, one hand, flat
+   dynamics, a non-library score) stays on the live paths above. */
+const HQ_B_MP3={"bk-echo":"echo-B.mp3","bk-joy-photo":"joy-B.mp3","bk-marching":"marching-B.mp3","bk-cradle":"cradle-B.mp3","bk-homr-demo":"canada-B.mp3"};
+const HQ_B_BPM={"bk-echo":100,"bk-joy-photo":130,"bk-marching":130,"bk-cradle":100,"bk-homr-demo":100};
+function bakedMp3File(){
+  const f=HQ_B_MP3[LIB_SEL_ID];
+  if(!f)return null;
+  if($("dynSel").value!=="expr"||$("handSel").value!=="both")return null;
+  if(Math.abs(parseFloat($("bpm").value)-HQ_B_BPM[LIB_SEL_ID])>0.01)return null;
+  return f;
+}
+async function tryPlayBmp3(el){
+  const f=bakedMp3File();
+  if(!f)return false;
+  demoBeatMap=perfBeatMap(true);
+  const ok=await new Promise(resolve=>{
+    let done=false;
+    const finish=v=>{if(done)return;done=true;el.removeEventListener("canplay",onOk);el.removeEventListener("error",onErr);resolve(v);};
+    const onOk=()=>finish(true),onErr=()=>finish(false);
+    el.addEventListener("canplay",onOk);el.addEventListener("error",onErr);
+    setTimeout(()=>finish(false),9000);
+    el.src=HQ_BASES[1]+f;
+    el.loop=$("loopDemo").checked;
+    const p=el.play();if(p&&p.catch)p.catch(()=>{});
+  });
+  if(!ok){demoBeatMap=null;return false;}
+  demoWavActive=true;
+  demoSyncStart();
+  if(!$("loopDemo").checked){
+    const totalSec=mapBeatToSec(demoBeatMap,totalBeats);
+    demoTimers.push(setTimeout(()=>{if(demoPlaying)stopDemo();},(totalSec+2.6)*1000));
+  }
+  return true;
 }
 /* warm the packs in the background on first touch (web version only —
    the fetch simply fails on the local single-file copy) */
@@ -1733,7 +1783,14 @@ $("demoBtn").onclick=()=>{
       if(!hqPacks.low||!hqPacks.high)setStatus("正在准备高音质音源（首次约 21 MB，下载一次后走缓存）…","");
       let r=null;
       try{r=await buildDemoWavHQ();}catch(e){r=null;}
-      if(!r)r=buildDemoWav();
+      if(!r){
+        const viaMp3=await tryPlayBmp3(el);
+        if(viaMp3){
+          if(demoStartBeat>0){const sb=demoStartBeat;demoStartBeat=0;try{el.currentTime=curBeatToSec(sb);}catch(e){}demoPosSync(sb);}
+          return;
+        }
+        r=buildDemoWav();
+      }
       demoBeatMap=r.beatMap||null;
       if(demoAudioUrl)URL.revokeObjectURL(demoAudioUrl);
       demoAudioUrl=URL.createObjectURL(r.blob);

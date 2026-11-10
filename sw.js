@@ -1,5 +1,5 @@
 /* 钢琴跟谱练习 — 离线缓存。页面升版时同步改 CACHE 名字，旧缓存会自动清掉。 */
-const CACHE = "piano-follow-v55";
+const CACHE = "piano-follow-v56";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
