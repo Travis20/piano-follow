@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <link rel="manifest" href="manifest.webmanifest">
-<title>钢琴跟谱练习分析 v49（双手）</title>
+<title>钢琴跟谱练习分析 v50（双手）</title>
 <style>
 :root{--ink:#22201d;--paper:#fffaf0;--line:#e3d7c3;--blue:#2563eb;--green:#15803d;--red:#dc2626;--amber:#d97706;--violet:#7c3aed;--teal:#0f766e}
 *{box-sizing:border-box}body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--paper);color:var(--ink)}
@@ -69,6 +69,7 @@ body{padding-bottom:84px}
 #transportBar{position:fixed;left:0;right:0;bottom:0;z-index:60;background:rgba(255,250,240,.97);border-top:1px solid var(--line);box-shadow:0 -4px 16px rgba(0,0,0,.10);padding:8px 10px calc(8px + env(safe-area-inset-bottom));display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 #transportBar button{padding:10px 18px;font-size:15px}
 #transportBar .tb-demo{background:var(--violet)}#transportBar .tb-mic{background:var(--teal)}#transportBar .tb-stop{background:var(--red)}
+#errToast{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:220;background:#b91c1c;color:#fff;font-size:14px;font-weight:700;line-height:1.5;padding:9px 14px;border-radius:10px;max-width:92vw;display:none;box-shadow:0 6px 20px rgba(0,0,0,.25);text-align:center}
 /* 3-2-1 count-in overlay */
 #countOverlay{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;pointer-events:none;background:rgba(34,32,29,.25)}
 #countNum{width:150px;height:150px;border-radius:50%;background:var(--violet);color:#fff;font-size:64px;font-weight:900;display:flex;align-items:center;justify-content:center;box-shadow:0 10px 40px rgba(0,0,0,.35);border:5px solid #fff}
@@ -290,6 +291,7 @@ html.land #transportBar button{padding:6px 12px;font-size:13.5px}
 </div></div>
 <div id="countOverlay"><div id="countNum">3</div></div>
 
+<div id="errToast"></div>
 <div id="transportBar">
 <button class="tb-demo" id="tDemo">▶ 试听</button>
 <button class="tb-mic" id="micBtn">🎤 开始</button>
@@ -655,7 +657,7 @@ const keyEls={};
     const el=document.createElement("div");el.className=isB?"bk":"wk";
     if(!isB)el.innerHTML="<span>"+(nm==="C"?mName(m):"")+"</span>";
     el.title=mName(m);
-    el.onclick=()=>{flashKey(m);if(running&&!paused)registerOnset([m],performance.now());};
+    el.onclick=()=>{flashKey(m);playTapNote(m);if(running&&!paused)registerOnset([m],performance.now());};
     kb.appendChild(el);keyEls[m]=el;
   }
 })();
@@ -840,12 +842,9 @@ function stopLoops(){if(detTimer)clearInterval(detTimer);if(metroTimer)clearInte
 let countTimers=[];
 function cancelCount(){countTimers.forEach(clearTimeout);countTimers=[];$("countOverlay").style.display="none";}
 function countTick(hi){
-  if(!actx)return;
-  try{
-    const t=actx.currentTime,o=actx.createOscillator(),g=actx.createGain();
-    o.frequency.value=hi?1560:940;g.gain.setValueAtTime(0.14,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.07);
-    o.connect(g).connect(actx.destination);o.start(t);o.stop(t+0.08);
-  }catch(e){}
+  /* v50: ticks go through the same <audio> route as the demo and the keys —
+     WebAudio output is exactly what kept failing on Hong's phone */
+  try{const u=renderTickUrls();const a=tapAudioEl();a.src=hi?u.hi:u.lo;const pr=a.play();if(pr&&pr.catch)pr.catch(()=>{});}catch(e){}
 }
 function countIn(done){
   cancelCount();
@@ -872,7 +871,8 @@ function beginRun(){
   metroTimer=setInterval(metroTick,90);highlightCur();syncTransport();
 }
 async function startMic(){
-  if(!curEff.length){setStatus("这个选择下没有要练的音，先载入曲谱或换一只手。","bad");return;}
+  if(!curEff.length){errToast("这个选择下没有要练的音，先载入曲谱或换一只手。");return;}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){errToast("这个打开方式用不了麦克风：请用 Safari 打开本页（在别的 App 内置浏览器里打开，麦克风会被挡住）。也可以先用“点琴键试流程”。");return;}
   try{
     if(!actx)actx=new (window.AudioContext||window.webkitAudioContext)();
     await actx.resume();
@@ -882,23 +882,30 @@ async function startMic(){
       analyser=actx.createAnalyser();analyser.fftSize=8192;analyser.smoothingTimeConstant=0.35;
       srcNode.connect(analyser);
     }
-    recChunks=[];recorder=new MediaRecorder(micStream);
-    recorder.ondataavailable=e=>{if(e.data.size)recChunks.push(e.data);};
-    recorder.onstop=()=>{const blob=new Blob(recChunks,{type:recorder.mimeType||"audio/webm"});$("recAudio").src=URL.createObjectURL(blob);$("recBox").style.display="block";};
-    recorder.start();
+    /* v50: recording is only for later playback — an add-on. Devices without
+       MediaRecorder (older iOS Safari) used to throw here and kill the whole
+       start, invisibly (the status line is gone since v44): the button just
+       looked dead. Now recording is optional and failures show a reason. */
+    recorder=null;
+    if(window.MediaRecorder){
+      try{
+        recChunks=[];recorder=new MediaRecorder(micStream);
+        recorder.ondataavailable=e=>{if(e.data.size)recChunks.push(e.data);};
+        recorder.onstop=()=>{const blob=new Blob(recChunks,{type:recorder.mimeType||"audio/webm"});$("recAudio").src=URL.createObjectURL(blob);$("recBox").style.display="block";};
+        recorder.start();
+      }catch(e){recorder=null;}
+    }
     $("micBtn").disabled=true;$("simBtn").disabled=true;$("stopBtn").disabled=false;$("pauseBtn").disabled=true;syncTransport();
-    setStatus("准备，倒数 3-2-1 后开始…","");
     countIn(()=>{
       beginRun();
       detTimer=setInterval(pollDetect,70);
-      setStatus($("modeSel").value==="metro"?"节拍器模式：跟着拍子弹！":"跟谱模式：弹第一个音 "+stepLabel(curEff[0])+" …","");
     });
-  }catch(err){setStatus("麦克风没打开：请允许麦克风权限，或用点琴键的方式先试流程。（"+err.message+"）","bad");}
+  }catch(err){errToast("麦克风没打开：请在弹出的询问里点“允许”。若没看到询问：设置 → Safari → 麦克风，选“询问”或“允许”。（"+err.message+"）");}
 }
 function stopAll(){finish("已结束，这是本次报告。");if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}}
 $("micBtn").onclick=startMic;
 $("simBtn").onclick=()=>{
-  if(!curEff.length){setStatus("这个选择下没有要练的音。","bad");return;}
+  if(!curEff.length){errToast("这个选择下没有要练的音。");return;}
   recorder=null;
   if(!actx)actx=new (window.AudioContext||window.webkitAudioContext)();actx.resume();
   $("micBtn").disabled=true;$("simBtn").disabled=true;$("stopBtn").disabled=false;$("pauseBtn").disabled=true;syncTransport();
@@ -1348,6 +1355,49 @@ function buildDemoWav(){
   let peak=0;for(let i=0;i<len;i++)peak=Math.max(peak,Math.abs(L[i]),Math.abs(R[i]));
   if(peak>0.95){const g=0.95/peak;for(let i=0;i<len;i++){L[i]*=g;R[i]*=g;}}
   return {blob:wavEncode([L,R],sr),usedSample};
+}
+/* ---------- v50: keys get a voice + visible start errors ----------
+   The on-screen keys used to only flash — no sound was ever wired to them,
+   so free play and the tap-the-keys flow were silent (Hong, 2026-11-09).
+   Tap sounds are rendered locally to small WAVs and played with <audio>
+   elements, the same route the demo uses and the only one proven audible
+   on Hong's phone; WebAudio output is not used for playback any more. */
+let errToastTimer=null;
+function errToast(msg){
+  const t=$("errToast");if(!t)return;
+  t.textContent=msg;t.style.display="block";
+  clearTimeout(errToastTimer);errToastTimer=setTimeout(()=>{t.style.display="none";},6000);
+}
+const tapUrls=new Map();const tapPool=[];let tapPoolIdx=0;
+function tapAudioEl(){
+  if(tapPool.length<6){const a=new Audio();a.preload="auto";tapPool.push(a);return a;}
+  const a=tapPool[tapPoolIdx%tapPool.length];tapPoolIdx++;return a;
+}
+function renderTapUrl(m){
+  if(tapUrls.has(m))return tapUrls.get(m);
+  const sr=44100,ring=1.5,len=Math.ceil((ring+0.5)*sr);
+  const L=new Float32Array(len),R=new Float32Array(len);
+  const s=nearestLoaded(m),buf=s&&sampleBufs.get(s.midi);
+  if(buf)mixSampleNote(L,R,sr,buf,s.midi,m,0,ring,0.9);
+  else mixSynthNote(L,R,sr,m,0,ring,0.9);
+  const wL=freeverbChannel(L,sr,0),wR=freeverbChannel(R,sr,23);
+  for(let i=0;i<len;i++){L[i]=L[i]*0.92+wL[i]*0.55;R[i]=R[i]*0.92+wR[i]*0.55;}
+  let peak=0;for(let i=0;i<len;i++)peak=Math.max(peak,Math.abs(L[i]),Math.abs(R[i]));
+  if(peak>0.95){const g=0.95/peak;for(let i=0;i<len;i++){L[i]*=g;R[i]*=g;}}
+  const url=URL.createObjectURL(wavEncode([L,R],sr));
+  tapUrls.set(m,url);return url;
+}
+function playTapNote(m){
+  if(!sampleBufs.size){ensureSamples().then(()=>playTapNote(m)).catch(()=>{});return;}
+  try{const a=tapAudioEl();a.src=renderTapUrl(m);const pr=a.play();if(pr&&pr.catch)pr.catch(()=>{});}catch(e){}
+}
+let tickUrls=null;
+function renderTickUrls(){
+  if(tickUrls)return tickUrls;
+  const sr=44100,mk=f=>{const n=Math.floor(sr*0.09),d=new Float32Array(n);
+    for(let i=0;i<n;i++)d[i]=Math.sin(2*Math.PI*f*i/sr)*Math.exp(-i/(sr*0.018))*0.5;
+    return URL.createObjectURL(wavEncode([d,d],sr));};
+  tickUrls={hi:mk(1560),lo:mk(940)};return tickUrls;
 }
 function demoSyncStop(){if(demoSyncTimer){clearInterval(demoSyncTimer);demoSyncTimer=null;}}
 function demoSyncStart(){
