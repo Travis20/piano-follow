@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <link rel="manifest" href="manifest.webmanifest">
-<title>钢琴跟谱练习分析 v54-2（双手）</title>
+<title>钢琴跟谱练习分析 v55（双手）</title>
 <style>
 :root{--ink:#22201d;--paper:#fffaf0;--line:#e3d7c3;--blue:#2563eb;--green:#15803d;--red:#dc2626;--amber:#d97706;--violet:#7c3aed;--teal:#0f766e}
 *{box-sizing:border-box}body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--paper);color:var(--ink)}
@@ -1261,7 +1261,7 @@ function stopDemo(){
   demoStartBeat=0;
   cancelCount();
   const da=$("demoAudio");if(da){try{da.pause()}catch(e){}}
-  demoWavActive=false;
+  demoWavActive=false;demoBeatMap=null;
   demoSyncStop();
   const dc=$("demoCtl");if(dc)dc.style.display="none";
   if(!running){const q=$("pauseBtn");if(q){q.disabled=true;q.textContent="⏸ 暂停";}if(typeof syncTransport==="function")syncTransport();}
@@ -1438,6 +1438,202 @@ function buildDemoWav(){
   if(peak>0.95){const g=0.95/peak;for(let i=0;i<len;i++){L[i]*=g;R[i]*=g;}}
   return {blob:wavEncode([L,R],sr),usedSample};
 }
+/* ---------- v55 HQ: live performance layer + multi-velocity sample packs ----------
+   The web version loads hq-index.json + two sample packs (same Salamander
+   recordings as the offline B renders, 8 velocity layers x 22 anchors,
+   MP3 128k, ~21 MB total, fetched once and then served from cache by the
+   service worker). Audition mixing then follows the B performance layer
+   (perf_song.py) in real time at the CURRENT tempo setting:
+     dynamics marks -> MIDI velocity (pp36 p50 mp63 mf76 f92 ff108),
+     phrase arch inside slurs, metrical stress, LH -6, deterministic jitter,
+     slur legato overlap, staccato 45%, repeated pitch 70%, slur-final 95%,
+     ties merged, slur-final beats stretched x1.05, final ritard x1.12/x1.25,
+     per-measure pedal (notes ring to the barline, natural sample decay),
+     gain law (vel/92)^2 like FluidSynth, dry mix (no freeverb — B is dry).
+   If the packs cannot be fetched (local single-file copy, app preview),
+   buildDemoWavHQ returns null and the embedded single-layer A path runs. */
+const HQ_DYN_VEL={pp:36,p:50,mp:63,mf:76,f:92,ff:108};
+let hqIndex=null,hqLoadPromise=null;const hqPacks={};
+let demoBeatMap=null; /* seconds at integer beats for the current demo WAV (HQ stretch map), null = constant tempo */
+function loadHqIndex(){
+  if(hqIndex)return Promise.resolve(hqIndex);
+  if(!hqLoadPromise)hqLoadPromise=(async()=>{
+    try{
+      const r=await fetch("hq-index.json");
+      if(!r.ok)return null;
+      const j=await r.json();
+      if(!j||!j.items||!j.layers)return null;
+      hqIndex=j;return j;
+    }catch(e){return null;}
+  })();
+  return hqLoadPromise.then(j=>{if(!j)hqLoadPromise=null;return j;});
+}
+async function loadHqPack(name){
+  if(hqPacks[name])return hqPacks[name];
+  const r=await fetch("hq-pack-"+name+".bin");
+  if(!r.ok)throw new Error("hq pack "+name+" "+r.status);
+  const ab=await r.arrayBuffer();
+  if(ab.byteLength<1000000)throw new Error("hq pack too small");
+  hqPacks[name]=ab;return ab;
+}
+/* warm the packs in the background on first touch (web version only —
+   the fetch simply fails on the local single-file copy) */
+["pointerdown","click"].forEach(t=>document.addEventListener(t,function hqWarm(){
+  document.removeEventListener(t,hqWarm,true);
+  loadHqIndex().then(j=>{if(j){loadHqPack("low").catch(()=>{});loadHqPack("high").catch(()=>{});}});
+},true));
+function hqLayerFor(vel){
+  let best=hqIndex.layers[0],bd=1e9;
+  for(const L of hqIndex.layers){const d=Math.abs(hqIndex.centers[L]-vel);if(d<bd){bd=d;best=L;}}
+  return best;
+}
+function perfArch(x,peak){if(x<=0||x>=1)return 0;const t=x<0.4?x/0.4:(1-x)/0.6;return peak*(t*t*(3-2*t));}
+function perfHand(h,expr){
+  const evs=tracks[h].filter(e=>e.notes.length);
+  let notes=[];
+  for(const e of evs)for(const m of e.notes)notes.push({midi:m,start:e._start,beats:e.beats});
+  const tiePairs=(curTies||[]).filter(t=>t.h===h);
+  const byKey=new Map();notes.forEach(n=>byKey.set(n.start+"|"+n.midi,n));
+  const skip=new Set(),merged=[];
+  for(const n of notes){
+    if(skip.has(n.start+"|"+n.midi))continue;
+    let curStart=n.start,curDur=n.beats;
+    while(true){
+      const tp=tiePairs.find(t=>Math.abs(t.from-curStart)<1e-6);
+      if(!tp)break;
+      const nn=byKey.get(tp.to+"|"+n.midi);
+      if(!nn)break;
+      curDur+=nn.beats;skip.add(tp.to+"|"+n.midi);curStart=tp.to;
+    }
+    merged.push({midi:n.midi,start:n.start,beats:curDur});
+  }
+  const onsets=[...new Set(merged.map(n=>n.start))].sort((a,b)=>a-b);
+  const rawBeats=new Map();
+  for(const e of evs){const a=rawBeats.get(e._start)||[];a.push(e.beats);rawBeats.set(e._start,a);}
+  const spans=(curSlurs||[]).filter(s=>s.h===h).map(s=>({a:s.from,b:s.to}));
+  const inSlur=st=>{for(const sp of spans)if(st>=sp.a-1e-6&&st<=sp.b+1e-6)return sp;return null;};
+  const nextOnset=st=>{for(const o of onsets)if(o>st+1e-9)return o;return null;};
+  for(const n of merged){
+    let vel=HQ_DYN_VEL.mf;
+    for(const d of (curDyn||[])){if(d.b<=n.start+1e-6)vel=HQ_DYN_VEL[d.t];else break;}
+    const span=inSlur(n.start),no=nextOnset(n.start);
+    if(expr){
+      if(span){
+        const lastBeats=Math.max.apply(null,rawBeats.get(span.b)||[1]);
+        const x=(n.start-span.a)/Math.max(span.b+lastBeats-span.a,1e-6);
+        vel+=perfArch(x,h==="rh"?7:4);
+      }
+      const bib=((n.start%curBts)+curBts)%curBts;
+      if(bib<1e-6)vel+=4;else if(curBts===4&&Math.abs(bib-2)<1e-6)vel+=2;
+      if(h==="lh")vel-=6;
+      vel+=((Math.trunc(n.start*7+n.midi)*2654435761)%5)-2;
+    }
+    n.vel=Math.max(25,Math.min(120,Math.round(vel)));
+    const ioi=no!=null?no-n.start:n.beats;
+    const noSpan=no!=null?inSlur(no):null;
+    const repeated=no!=null&&merged.some(x=>x.midi===n.midi&&Math.abs(x.start-no)<1e-9);
+    const isLastSlur=!!span&&((no!=null&&!noSpan)||no==null);
+    const stacc=(curStacc[h]||[]).some(b=>Math.abs(b-n.start)<0.01);
+    n.legatoIoi=null;
+    if(!expr)n.durBeats=n.beats*0.93;
+    else if(stacc)n.durBeats=n.beats*0.45;
+    else if(span&&no!=null&&noSpan===span){n.durBeats=null;n.legatoIoi=ioi;}
+    else if(repeated)n.durBeats=ioi*0.70;
+    else if(isLastSlur)n.durBeats=n.beats*0.95;
+    else n.durBeats=n.beats*0.93;
+  }
+  return merged;
+}
+function perfBeatMap(expr){
+  const sec=spb(),total=Math.ceil(totalBeats),stretch={};
+  if(expr){
+    for(const s of (curSlurs||[])){const b=Math.floor(s.to+1e-9);stretch[b]=Math.max(stretch[b]||1,1.05);}
+    if(total>=2){stretch[total-2]=Math.max(stretch[total-2]||1,1.12);stretch[total-1]=Math.max(stretch[total-1]||1,1.25);}
+  }
+  const map=[0];
+  for(let b=0;b<total;b++)map.push(map[b]+sec*(stretch[b]||1));
+  return map;
+}
+function mapBeatToSec(map,b){
+  const w=Math.floor(Math.min(Math.max(b,0),map.length-1));
+  if(w>=map.length-1)return map[map.length-1];
+  return map[w]+(b-w)*(map[w+1]-map[w]);
+}
+function mapSecToBeat(map,t){
+  let w=0;
+  while(w<map.length-2&&map[w+1]<=t)w++;
+  const span=map[w+1]-map[w];
+  return span>0?w+Math.min(1,Math.max(0,(t-map[w])/span)):w;
+}
+function curBeatToSec(b){return demoBeatMap?mapBeatToSec(demoBeatMap,b):b*(demoSec||spb());}
+function curSecToBeat(t){return demoBeatMap?mapSecToBeat(demoBeatMap,t):t/(demoSec||spb());}
+function mixSampleNoteHQ(L,R,sr,buf,baseMidi,m,startSec,ringSec,gain){
+  const chL=buf.getChannelData(0),chR=buf.numberOfChannels>1?buf.getChannelData(1):chL;
+  const rate=Math.pow(2,(m-baseMidi)/12);
+  const t0=Math.floor(startSec*sr),maxI=Math.min(L.length-t0,Math.floor((ringSec+0.3)*sr)),relFrom=Math.floor(ringSec*sr);
+  const avail=Math.floor(buf.length*sr/(rate*buf.sampleRate));
+  for(let i=0;i<maxI;i++){
+    const pos=i*rate*(buf.sampleRate/sr),idx=Math.floor(pos);
+    if(idx>=chL.length-1)break;
+    const fr=pos-idx;
+    let env=1;
+    if(i>relFrom)env=Math.exp(-(i-relFrom)/(0.09*sr));
+    const remain=(avail-i)/sr;if(remain<0.35)env*=Math.max(0,remain/0.35);
+    L[t0+i]+=gain*env*(chL[idx]*(1-fr)+chL[idx+1]*fr);
+    R[t0+i]+=gain*env*(chR[idx]*(1-fr)+chR[idx+1]*fr);
+  }
+}
+async function buildDemoWavHQ(){
+  const idx=await loadHqIndex();
+  if(!idx)return null;
+  const expr=$("dynSel").value==="expr",hands=selHands();
+  const map=perfBeatMap(expr),sr=44100;
+  const totalSec=mapBeatToSec(map,totalBeats);
+  const len=Math.ceil((totalSec+1.8)*sr);
+  const L=new Float32Array(len),R=new Float32Array(len);
+  let notes=[];
+  for(const h of hands)for(const n of perfHand(h,expr))notes.push(n);
+  const groups=new Map();
+  for(const n of notes){
+    const a=nearestSample(n.midi);
+    n.anchor=a.midi;n.layer=hqLayerFor(n.vel);
+    const key=a.midi+"|"+n.layer;
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(n);
+  }
+  if(!decodeCtx){try{decodeCtx=new OfflineAudioContext(1,1,44100);}catch(e){decodeCtx=new (window.AudioContext||window.webkitAudioContext)();}}
+  for(const [key,gns] of groups){
+    const item=idx.items[key];
+    if(!item)continue;
+    let buf=null;
+    try{
+      const pack=await loadHqPack(item.pack);
+      buf=await decodeCtx.decodeAudioData(pack.slice(item.off,item.off+item.len));
+    }catch(e){continue;}
+    for(const n of gns){
+      const startSec=mapBeatToSec(map,n.start);
+      let durSec,endBeat;
+      if(n.durBeats==null){
+        const ioiS=mapBeatToSec(map,n.start+n.legatoIoi)-startSec;
+        const ov=Math.min(130,Math.max(25,90*Math.sqrt(ioiS/0.6)))/1000;
+        durSec=ioiS+ov;endBeat=n.start+n.legatoIoi;
+      }else{
+        durSec=mapBeatToSec(map,n.start+n.durBeats)-startSec;
+        endBeat=n.start+n.durBeats;
+      }
+      let ringEnd;
+      if(endBeat>=totalBeats-1e-9)ringEnd=totalSec+1.2;
+      else ringEnd=mapBeatToSec(map,Math.min(totalBeats,(Math.floor(endBeat/curBts+1e-9)+1)*curBts))-0.07;
+      const ringSec=Math.max(durSec,ringEnd-startSec);
+      mixSampleNoteHQ(L,R,sr,buf,n.anchor,n.midi,startSec,ringSec,Math.pow(n.vel/92,2)*0.9);
+    }
+  }
+  let peak=0;
+  for(let i=0;i<len;i++)peak=Math.max(peak,Math.abs(L[i]),Math.abs(R[i]));
+  if(peak>0.99){const g=0.99/peak;for(let i=0;i<len;i++){L[i]*=g;R[i]*=g;}}
+  if(peak<0.01)return null; /* nothing audible decoded — fall back to A */
+  return {blob:wavEncode([L,R],sr),beatMap:map,hq:true};
+}
 /* ---------- v50: keys get a voice + visible start errors ----------
    The on-screen keys used to only flash — no sound was ever wired to them,
    so free play and the tap-the-keys flow were silent (Hong, 2026-11-09).
@@ -1484,12 +1680,12 @@ function renderTickUrls(){
 function demoSyncStop(){if(demoSyncTimer){clearInterval(demoSyncTimer);demoSyncTimer=null;}}
 function demoSyncStart(){
   demoSyncStop();
-  const sec=spb(),el=$("demoAudio");
-  demoSec=sec;
+  const el=$("demoAudio");
+  demoSec=spb();
   let lastKey="";
   demoSyncTimer=setInterval(()=>{
     if(!demoPlaying)return;
-    const cb=el.currentTime/sec;
+    const cb=curSecToBeat(el.currentTime);
     demoPosSync(cb);
     for(const h of ["rh","lh"])tracks[h].forEach((e,k)=>{
       const on=e.notes.length&&cb>=e._start&&cb<e._start+e.beats;
@@ -1534,7 +1730,11 @@ $("demoBtn").onclick=()=>{
     try{
       await ensureSamples(); /* embedded decode is local (~0.3 s); never build before the real samples are in */
       if(!demoPlaying)return;
-      const r=buildDemoWav();
+      if(!hqPacks.low||!hqPacks.high)setStatus("正在准备高音质音源（首次约 21 MB，下载一次后走缓存）…","");
+      let r=null;
+      try{r=await buildDemoWavHQ();}catch(e){r=null;}
+      if(!r)r=buildDemoWav();
+      demoBeatMap=r.beatMap||null;
       if(demoAudioUrl)URL.revokeObjectURL(demoAudioUrl);
       demoAudioUrl=URL.createObjectURL(r.blob);
       el.src=demoAudioUrl;
@@ -1542,9 +1742,9 @@ $("demoBtn").onclick=()=>{
       el.loop=$("loopDemo").checked;
       const p=el.play();if(p&&p.catch)p.catch(()=>{});
       demoSyncStart();
-      if(demoStartBeat>0){const sb=demoStartBeat;demoStartBeat=0;try{el.currentTime=sb*(demoSec||spb());}catch(e){}demoPosSync(sb);setStatus("从第 "+(sb+1)+" 拍（第 "+(Math.floor(sb/curBts)+1)+" 小节）开始试听。","");}
-      
-      setStatus("试听播放中——声音走的是手机系统播放器（和音乐术语页同一种方式）。","ok");
+      if(demoStartBeat>0){const sb=demoStartBeat;demoStartBeat=0;try{el.currentTime=curBeatToSec(sb);}catch(e){}demoPosSync(sb);setStatus("从第 "+(sb+1)+" 拍（第 "+(Math.floor(sb/curBts)+1)+" 小节）开始试听。","");}
+
+      setStatus(r.hq?"试听播放中——高音质多层音源（B 式演奏，按当前速度现生成）。":"试听播放中——声音走的是手机系统播放器（和音乐术语页同一种方式）。","ok");
     }catch(err){
       /* fallback: the old live WebAudio path */
       try{
@@ -1582,15 +1782,15 @@ function toggleDemoPause(){
     if(demoPlaying||demoWavActive){
       /* Hong's rule: paged to another section while paused -> resume FROM
          that page; stayed on the same page -> resume from the pause point */
-      const secR=demoSec||spb(),cbR=el.currentTime/secR;
-      if(demoWavActive&&(cbR<staffWin||cbR>=staffWin+PB())){el.currentTime=staffWin*secR;demoPosSync(staffWin);staffHoldUntil=0;}
+      const cbR=curSecToBeat(el.currentTime);
+      if(demoWavActive&&(cbR<staffWin||cbR>=staffWin+PB())){el.currentTime=curBeatToSec(staffWin);demoPosSync(staffWin);staffHoldUntil=0;}
       const p=el.play();if(p&&p.catch)p.catch(()=>{});
     }
   }
   else el.pause();
   demoPauseSync();
   if(demoPlaying){
-    const cbS=el.currentTime/(demoSec||spb());
+    const cbS=curSecToBeat(el.currentTime);
     setStatus(el.paused?("试听已暂停在第 "+(Math.floor(cbS)+1)+" 拍（第 "+(Math.floor(cbS/curBts)+1)+" 小节）：点“继续”从这里接着放；先翻到别的段再点“继续”，就从那一段开始放。"):("试听从第 "+(Math.floor(cbS)+1)+" 拍继续播放。"),"");
   }
 }
@@ -1608,9 +1808,9 @@ $("demoSeek").addEventListener("change",e=>{
   const el=$("demoAudio");
   if(!demoPlaying||!demoWavActive)return;
   staffHoldUntil=0;
-  const beat=parseFloat(e.target.value),sec=demoSec||spb();
-  const dur=el.duration||beat*sec;
-  el.currentTime=Math.max(0,Math.min(beat*sec,Math.max(0,dur-0.05)));
+  const beat=parseFloat(e.target.value),bt=curBeatToSec(beat);
+  const dur=el.duration||bt;
+  el.currentTime=Math.max(0,Math.min(bt,Math.max(0,dur-0.05)));
   demoPosSync(beat);
 });
 /* ===== [11-omr.js] 读取 · 页面内简易 OMR + 曲名识别 ===== */
