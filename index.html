@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <link rel="manifest" href="manifest.webmanifest">
-<title>钢琴跟谱练习分析 v56（双手）</title>
+<title>钢琴跟谱练习分析 v57（双手）</title>
 <style>
 :root{--ink:#22201d;--paper:#fffaf0;--line:#e3d7c3;--blue:#2563eb;--green:#15803d;--red:#dc2626;--amber:#d97706;--violet:#7c3aed;--teal:#0f766e}
 *{box-sizing:border-box}body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--paper);color:var(--ink)}
@@ -401,6 +401,7 @@ let curKey={rh:[],lh:[]}; /* key-signature note names per hand, drawn after the 
 let curKeyPc=new Set(); /* pitch classes the key signature sharpens */
 let curFing={rh:[],lh:[]}; /* fingerings as [startBeat, midi, finger] per hand (display only) */
 let curForceAcc={}; /* printed courtesy accidentals the rules would skip: {hand:{"startBeat":"n"|"#"|"b"}} */
+let curLhTrebleFrom=null; /* beat from which the LH staff is written in treble clef in the book (e.g. Cradle Song's final system); null = bass throughout */
 let staffBaseX=78; /* x of beat 0 on the staff; grows when a key signature needs room */
 let results=[],attempts=0,running=false,paused=false;
 let actx=null,analyser=null,micStream=null,detTimer=null,metroTimer=null,recorder=null,recChunks=[];
@@ -449,7 +450,7 @@ function loadScore(tr,info){
   curBts=tr.bts||4;curKey=tr.key||{rh:[],lh:[]};curFing=tr.fing||{rh:[],lh:[]};curForceAcc=tr.forceAcc||{};
   curKeyPc=new Set([...(curKey.rh||[]),...(curKey.lh||[])].map(n=>nameToMidi(n)).filter(x=>x!=null).map(x=>x%12));
   staffBaseX=(curKey.rh&&curKey.rh.length)||(curKey.lh&&curKey.lh.length)?102:78;
-  curSlurs=tr.slurs||[];curTies=tr.ties||[];curStacc=tr.stacc||{rh:[],lh:[]};curDyn=tr.dyn||[];curForceStem=tr.forceStem||{};
+  curSlurs=tr.slurs||[];curTies=tr.ties||[];curStacc=tr.stacc||{rh:[],lh:[]};curDyn=tr.dyn||[];curForceStem=tr.forceStem||{};curLhTrebleFrom=(tr.lhTrebleFrom!=null)?tr.lhTrebleFrom:null;
   const tR=assignStarts(tracks.rh),tL=assignStarts(tracks.lh);
   totalBeats=Math.max(tR,tL);
   buildSteps();computeEff();
@@ -471,6 +472,13 @@ const STAFF={rh:{topY:34,topStep:38,botStep:30},lh:{topY:146,topStep:26,botStep:
 const PB=()=> (document.documentElement.classList.contains("land")||(window.matchMedia&&matchMedia("(orientation: landscape)").matches))?48:16; /* beats per PAGE (visible window): landscape = two systems of 24 */
 const PBS=()=> (document.documentElement.classList.contains("land")||(window.matchMedia&&matchMedia("(orientation: landscape)").matches))?24:16; /* beats per SYSTEM (one row) */
 const staffY=(h,step)=>STAFF[h].topY+(STAFF[h].topStep-step)*5;
+/* clef change (v57): some books switch the LH staff to treble clef for a
+   passage (Cradle Song's final system). From curLhTrebleFrom on, LH notes
+   are positioned with TREBLE geometry on the lower staff (top line F5 =
+   step 38, bottom line E4 = step 30, middle line B4 = step 34). Rests in
+   such a passage still use bass geometry — no current score needs it. */
+const staffYFor=(h,step,start)=>(h==="lh"&&curLhTrebleFrom!=null&&start!=null&&start>=curLhTrebleFrom)?STAFF.lh.topY+(38-step)*5:staffY(h,step);
+const lhGeom=(h,start)=>(h==="lh"&&curLhTrebleFrom!=null&&start!=null&&start>=curLhTrebleFrom)?{topStep:38,botStep:30,mid:34}:{topStep:STAFF[h].topStep,botStep:STAFF[h].botStep,mid:h==="rh"?34:22};
 /* horizontal layout (v53): every measure owns a slot of curBts beats plus
    20px of padding, and notes start 14px into the slot — so a barline always
    falls inside the padding gap. With plain beat-linear spacing, a note half
@@ -537,8 +545,14 @@ function drawSystem(staffWin,pb,W){
     g+='<text class="bnum" x="'+(slotX(b)+8)+'" y="16" font-size="11">'+(b/curBts+1)+'</text>';
   }
   g+='<text class="clef" x="14" y="76" font-size="58" font-family="\'Noto Music\',\'Bravura\',serif">𝄞</text>';
-  g+='<text class="clef" x="16" y="182" font-size="42" font-family="\'Noto Music\',\'Bravura\',serif">𝄢</text>';
-  for(const h of ["rh","lh"])(curKey[h]||[]).forEach((nm,i)=>{const md=nameToMidi(nm);if(md!=null)g+=accGlyph("#",47+i*11,staffY(h,stepOf(md)));});
+  if(curLhTrebleFrom!=null&&staffWin>=curLhTrebleFrom){
+    g+='<text class="clef" x="14" y="188" font-size="58" font-family="\'Noto Music\',\'Bravura\',serif">𝄞</text>';
+  }else{
+    g+='<text class="clef" x="16" y="182" font-size="42" font-family="\'Noto Music\',\'Bravura\',serif">𝄢</text>';
+    if(curLhTrebleFrom!=null&&curLhTrebleFrom<staffWin+pb)
+      g+='<text class="clef" x="'+(staffX(curLhTrebleFrom)-29)+'" y="188" font-size="38" font-family="\'Noto Music\',\'Bravura\',serif">𝄞</text>';
+  }
+  for(const h of ["rh","lh"])(curKey[h]||[]).forEach((nm,i)=>{const md=nameToMidi(nm);if(md!=null)g+=accGlyph("#",47+i*11,staffYFor(h,stepOf(md),staffWin));});
   const tsX=(curKey.rh&&curKey.rh.length)||(curKey.lh&&curKey.lh.length)?70:52;
   g+='<text class="clef" x="'+tsX+'" y="52" font-size="19" font-weight="700" font-family="serif">'+curBts+'</text><text class="clef" x="'+tsX+'" y="72" font-size="19" font-weight="700" font-family="serif">4</text>';
   g+='<text class="clef" x="'+tsX+'" y="164" font-size="19" font-weight="700" font-family="serif">'+curBts+'</text><text class="clef" x="'+tsX+'" y="184" font-size="19" font-weight="700" font-family="serif">4</text>';
@@ -567,15 +581,16 @@ function drawSystem(staffWin,pb,W){
      stem direction follows the note farthest from the middle line */
   const beamOf={},beamSvg=[];
   for(const h of ["rh","lh"]){
-    const evs=tracks[h],mid=h==="rh"?34:22;
+    const evs=tracks[h];
     for(let i=0;i+1<evs.length;i++){
       const a=evs[i],b=evs[i+1];
       if(!(a.beats===0.5&&b.beats===0.5&&a.notes.length&&b.notes.length))continue;
       if(Math.abs(b._start-a._start-0.5)>0.01||Math.abs(a._start-Math.round(a._start))>0.01)continue;
       if(a._start<staffWin||b._start>=staffWin+pb)continue;
+      const mid=lhGeom(h,a._start).mid;
       const allSteps=[...a.notes,...b.notes].map(stepOf);
       const dir=(mid-Math.min(...allSteps))>(Math.max(...allSteps)-mid)?1:-1;
-      const ext=e=>{const ys=e.notes.map(m=>staffY(h,stepOf(m)));return dir>0?Math.min(...ys):Math.max(...ys);};
+      const ext=e=>{const ys=e.notes.map(m=>staffYFor(h,stepOf(m),e._start));return dir>0?Math.min(...ys):Math.max(...ys);};
       const xa=staffX(a._start)+(dir>0?6:-6),xb=staffX(b._start)+(dir>0?6:-6);
       const y1=ext(a)+(dir>0?-34:34);
       const y2=y1+Math.max(-10,Math.min(10,ext(b)-ext(a)));
@@ -595,7 +610,7 @@ function drawSystem(staffWin,pb,W){
       drawn++;
       const notes=e.notes.slice().sort((a,b)=>stepOf(a)-stepOf(b));
       const stepsArr=notes.map(stepOf);
-      const midStep=h==="rh"?34:22;
+      const G=lhGeom(h,e._start),midStep=G.mid;
       /* standard stem rule (v52): the note farthest from the middle line
          decides; a note ON the middle line (or a tie) takes its stem DOWN */
       const bm=beamOf[h+":"+e._start];
@@ -605,22 +620,22 @@ function drawSystem(staffWin,pb,W){
       let s='<g class="stnote'+(e._state?" "+e._state:"")+'" id="st'+h+k+'">';
       let lastStep=null;
       notes.forEach((m,i)=>{
-        const st=stepsArr[i],y=staffY(h,st);
+        const st=stepsArr[i],y=staffYFor(h,st,e._start);
         let nx=x;if(lastStep!==null&&st-lastStep===1)nx=x+(up?12:-12);lastStep=st;
-        for(let ls=S.topStep+2;ls<=st;ls+=2)s+='<line class="ledger" x1="'+(nx-11)+'" y1="'+staffY(h,ls)+'" x2="'+(nx+11)+'" y2="'+staffY(h,ls)+'"/>';
-        for(let ls=S.botStep-2;ls>=st;ls-=2)s+='<line class="ledger" x1="'+(nx-11)+'" y1="'+staffY(h,ls)+'" x2="'+(nx+11)+'" y2="'+staffY(h,ls)+'"/>';
+        for(let ls=G.topStep+2;ls<=st;ls+=2)s+='<line class="ledger" x1="'+(nx-11)+'" y1="'+staffYFor(h,ls,e._start)+'" x2="'+(nx+11)+'" y2="'+staffYFor(h,ls,e._start)+'"/>';
+        for(let ls=G.botStep-2;ls>=st;ls-=2)s+='<line class="ledger" x1="'+(nx-11)+'" y1="'+staffYFor(h,ls,e._start)+'" x2="'+(nx+11)+'" y2="'+staffYFor(h,ls,e._start)+'"/>';
         const sg=accSign[h+":"+k+":"+m];if(sg)s+=accGlyph(sg,nx-16,y);
         s+='<ellipse class="nh'+(hollow?" hollow":"")+'" cx="'+nx+'" cy="'+y+'" rx="'+(whole?8:6.4)+'" ry="4.6" transform="rotate(-18 '+nx+' '+y+')"/>';
-        if(dotted)s+='<circle class="dot" cx="'+(nx+15)+'" cy="'+(((S.topStep-st)%2===0)?y-2.5:y)+'" r="1.9"/>';
+        if(dotted)s+='<circle class="dot" cx="'+(nx+15)+'" cy="'+(((G.topStep-st)%2===0)?y-2.5:y)+'" r="1.9"/>';
       });
       for(const f of (curFing[h]||[])){
         if(Math.abs(f[0]-e._start)>0.01)continue;
         const fi=notes.indexOf(f[1]);if(fi<0)continue;
         const foff=(fi>0&&stepsArr[fi]-stepsArr[fi-1]===1)?(up?12:-12):0;
-        s+='<text class="fing" x="'+(x+foff)+'" y="'+(up?staffY(h,stepsArr[fi])+17:staffY(h,stepsArr[fi])-14)+'" font-size="10.5" text-anchor="middle">'+f[2]+'</text>';
+        s+='<text class="fing" x="'+(x+foff)+'" y="'+(up?staffYFor(h,stepsArr[fi],e._start)+17:staffYFor(h,stepsArr[fi],e._start)-14)+'" font-size="10.5" text-anchor="middle">'+f[2]+'</text>';
       }
       if(!whole){
-        const ys=stepsArr.map(st=>staffY(h,st));
+        const ys=stepsArr.map(st=>staffYFor(h,st,e._start));
         const sx=up?x+6:x-6,sy1=up?Math.min(...ys):Math.max(...ys),sy2=bm?bm.yAt(sx):(up?sy1-34:sy1+34);
         s+='<line class="stem" x1="'+sx+'" y1="'+sy1+'" x2="'+sx+'" y2="'+sy2+'"/>';
         if(e.beats===0.5&&!bm){
@@ -645,7 +660,7 @@ function drawSystem(staffWin,pb,W){
     if(sl.to<p0||sl.from>=p1)continue;
     const evs=tracks[h].filter(e=>e.notes.length&&e._start>=sl.from&&e._start<=sl.to&&e._start>=p0&&e._start<p1);
     if(!evs.length)continue;
-    const outerY=e=>{const ys=e.notes.map(m=>staffY(h,stepOf(m)));return sl.side==="a"?Math.min(...ys):Math.max(...ys);};
+    const outerY=e=>{const ys=e.notes.map(m=>staffYFor(h,stepOf(m),e._start));return sl.side==="a"?Math.min(...ys):Math.max(...ys);};
     const x1=staffX(evs[0]._start),x2=staffX(evs[evs.length-1]._start);
     const y1=outerY(evs[0])+(sl.side==="a"?-11:11),y2=outerY(evs[evs.length-1])+(sl.side==="a"?-11:11);
     const bow=Math.min(20,7+(x2-x1)*0.10);
@@ -655,9 +670,10 @@ function drawSystem(staffWin,pb,W){
   /* ties (v52 — the arc hugs its own notehead on the side away from the
      stem: outer chord notes arc outward, single notes arc opposite the stem) */
   for(const ti of curTies){
-    const h=ti.h,mid=h==="rh"?34:22;
+    const h=ti.h;
     const e1=tracks[h].find(e=>Math.abs(e._start-ti.from)<0.01),e2=tracks[h].find(e=>Math.abs(e._start-ti.to)<0.01);
     if(!e1||!e2||e1._start<staffWin||e1._start>=staffWin+pb||e2._start<staffWin||e2._start>=staffWin+pb)continue;
+    const mid=lhGeom(h,e1._start).mid;
     /* tie endpoints sit at the tied head's own rendered cx — in a
        second-interval cluster that head is offset sideways (v54) */
     const headCx=(e,m)=>{
@@ -675,7 +691,7 @@ function drawSystem(staffWin,pb,W){
       if(ti.side)side=ti.side;
       else if(sorted.length>1)side=m===sorted[sorted.length-1]?"a":(m===sorted[0]?"b":"a");
       else side=stepOf(m)<mid?"b":"a";
-      const y0=staffY(h,stepOf(m)),y=side==="a"?y0-8:y0+8;
+      const y0=staffYFor(h,stepOf(m),e1._start),y=side==="a"?y0-8:y0+8;
       g+='<path class="tie" d="M '+x1+' '+y+' Q '+((x1+x2)/2)+' '+(side==="a"?y-6:y+6)+' '+x2+' '+y+'"/>';
     }
   }
@@ -2154,7 +2170,7 @@ const BUILTIN_LIB=[
   {id:"bk-homr-demo",name:"Goodbye dear old Canada（homr 照片识谱演示）",baked:true,dyn:[{b:0,t:"f"}],rhTxt:"C4:0.5 F4:0.5 E4:0.5 F4:0.5 G4:0.5 A4:0.5 C5:0.5 A#4:0.5 A4:0.5 A#4:0.5 C5:0.5 D5:0.5 E5:0.5 [C5+F5]:0.5 A#4:0.5 [A4+F5]:0.5 C4:0.5 F4:0.5 E4:0.5 F4:0.5 G4:0.5 A4:0.5 F4:0.5 F4:0.5 E4:0.5 D4:0.5 E4:0.5 F4:0.5 G4:0.5 A4:1 A4:0.5 A4:0.5 R:0.5 [C4+F4]:0.5 E4:0.5 F4:0.5 [E4+G4]:0.5 [F4+A4]:0.5 [C4+F4]:0.5 F4:0.5 [C4+E4]:0.5 D4:0.5 [C4+E4]:0.5 [D4+F4]:0.25 C4:0.25 [A#3+G4]:0.5 [A3+C4+A4]:1 [A3+C4+A4]:0.5 A4:0.5 A#4:0.5 A4:0.5 G4:0.5 C5:0.5 A4:0.5 G4:0.5 F4:0.5 F4:0.5 G4:0.5 D4:0.5 E4:0.5 F4:0.5 G4:1 G4:0.5 C4:0.5 [F4+A#4]:0.5 [F4+A4]:0.5 [E4+G4]:0.5 [E4+C5]:0.5 [F4+A4]:0.5 [E4+G4]:0.5 F4:0.5 F4:0.5 G4:0.5 D4:0.5 E4:0.5 F4:0.5 G4:0.25 A4:0.25 G4:0.25 E4:0.25 C4:0.5 C4:0.5",lhTxt:"R:0.5 [F3+A3]:0.5 G3:0.5 [F3+C4]:0.5 A#3:0.5 A3:0.5 C4:0.5 A#3:0.5 C4:0.5 [A#2+A#3+D4]:1 [A#2+A#3]:1 [F3+C4]:0.5 [C3+C4]:0.5 [F3+C4]:9 R:0.5 F2:0.5 A3:0.5 G#3:0.5 G3:0.5 F3:1 F2:1 A#2:0.5 A#3:0.5 [F3+A3]:0.5 G3:0.5 F3:0.5 C3:0.5 F3:0.5 R:8.5 A#2:0.5 A3:0.5 C3:0.5 A#3:0.5 F3:0.5 C4:0.5 C3:0.5 F3:0.5 G3:0.5 A#3:0.5 G3:0.5 A3:0.5 G3:0.5 E3:0.5 C3:1"},
   {id:"bk-joy-photo",name:"Joy to the World（三方交叉校对＋照片逐项复核版）",bpm:130,baked:true,dyn:[{b:0,t:"f"},{b:31,t:"mf"},{b:47,t:"mp"},{b:53,t:"mf"},{b:64,t:"f"}],rhTxt:"C5:2 B4:1.5 A4:0.5 G4:3 F4:1 E4:2 D4:2 C4:3 G4:1 A4:3 A4:1 B4:3 B4:1 [E4+C5]:4 [E4+C5]:3 C5:1 C5:1 B4:1 A4:1 G4:1 G4:1.5 F4:0.5 E4:1 R:1 R:4 R:2 R:1 E4:1 E4:1 E4:1 E4:1 E4:0.5 F4:0.5 G4:3 F4:0.5 E4:0.5 D4:1 D4:1 D4:1 D4:0.5 E4:0.5 F4:3 E4:0.5 D4:0.5 C4:1 C5:2 A4:1 G4:1.5 F4:0.5 E4:1 F4:1 E4:2 D4:2 C4:4",lhTxt:"[C2+G2]:4 R:4 G3:2 F3:2 E3:3 R:1 F3:4 [F3+G3]:4 C3:1 D3:0.5 E3:0.5 F3:0.5 G3:0.5 A3:0.5 B3:0.5 C4:3 R:1 R:4 R:2 R:1 C4:1 C4:1 B3:1 A3:1 G3:1 G3:1.5 F3:0.5 E3:1 R:1 [C3+G3]:4 R:1 [C3+G3]:1 [C3+G3]:2 [F3+G3]:4 R:1 [F3+G3]:1 [F3+G3]:2 [C3+E3+G3]:4 [C3+E3+G3]:3 R:1 G3:2 [B2+F3+G3]:2 [C3+E3+G3]:2 C2:2",slurs:[{h:"rh",from:0,to:12,side:"a"},{h:"rh",from:15,to:28,side:"a"},{h:"rh",from:31,to:38,side:"a"},{h:"lh",from:39,to:45,side:"a"},{h:"rh",from:51,to:51.5,side:"b"},{h:"rh",from:55,to:55.5,side:"b"},{h:"rh",from:59,to:59.5,side:"b"},{h:"rh",from:63,to:63.5,side:"b"},{h:"rh",from:63,to:70,side:"a"},{h:"rh",from:71,to:76,side:"b"},{h:"lh",from:24,to:28,side:"a"}],ties:[{h:"rh",from:24,to:28},{h:"lh",from:64,to:68}],stacc:{rh:[47,48,49,50,56,57,58],lh:[53,61]}},
   {id:"bk-marching",name:"Marching Fingers（Joyner · 照片三方校对版）",bpm:130,baked:true,dyn:[{b:0,t:"mf"},{b:32,t:"f"},{b:64,t:"mf"}],rhTxt:"R:4 R:4 C4:1 D4:1 E4:1 F4:1 G4:4 F4:1 F4:1 F4:1 G4:1 E4:2 E4:2 G4:1 F4:1 E4:1 D4:1 C4:2 R:2 A4:1 A4:1 A4:1 A4:1 G4:2 E4:2 F4:2 F4:1 G4:1 E4:4 R:4 R:2 C4:2 D4:1 E4:1 F#4:1 D4:1 G4:4 R:4 R:4 C4:1 D4:1 E4:1 F4:1 G4:4 F4:1 F4:1 F4:1 G4:1 E4:2 E4:2 G4:1 F4:1 E4:1 D4:1 C4:2 R:2",lhTxt:"C3:1 D3:1 E3:1 F3:1 G3:2 G3:2 R:4 R:4 B3:2 G3:2 C4:2 G3:2 B3:2 G3:2 C4:2 C3:2 R:4 R:4 B3:2 G3:2 C4:2 G3:2 A3:1 A3:1 A3:1 A3:1 G3:2 R:2 F#3:2 D3:2 G3:1 F3:1 E3:1 D3:1 C3:1 D3:1 E3:1 F3:1 G3:2 G3:2 R:4 R:4 B3:2 G3:2 C4:2 G3:2 B3:2 G3:2 C4:2 C3:2",slurs:[{h:"rh",from:8,to:11,side:"a"},{h:"rh",from:16,to:22,side:"a"},{h:"rh",from:24,to:27,side:"a"},{h:"rh",from:32,to:38,side:"a"},{h:"rh",from:40,to:44,side:"a"},{h:"rh",from:56,to:59,side:"a"},{h:"rh",from:72,to:75,side:"a"},{h:"rh",from:80,to:86,side:"a"},{h:"rh",from:88,to:92,side:"a"},{h:"lh",from:0,to:6,side:"a"},{h:"lh",from:16,to:22,side:"a"},{h:"lh",from:24,to:26,side:"a"},{h:"lh",from:40,to:46,side:"a"},{h:"lh",from:48,to:54,side:"a"},{h:"lh",from:56,to:63,side:"a"},{h:"lh",from:64,to:70,side:"a"},{h:"lh",from:80,to:86,side:"a"},{h:"lh",from:88,to:92,side:"a"}],fing:{rh:[[8,60,1],[16,65,4],[24,67,5],[32,69,5],[40,65,3],[54,60,1]],lh:[[0,48,5],[16,59,3],[28,60,3],[40,59,3],[56,54,3],[60,55,1],[80,59,3],[92,60,3]]},forceAcc:{lh:{"61":"n"}}},
-  {id:"bk-cradle",name:"A Cradle Song（Weybright · 照片三方校对版）",baked:true,dyn:[{b:0,t:"p"},{b:16,t:"mf"}],bts:2,rhTxt:"E4:1 G4:0.5 E4:0.5 D4:1 C4:0.5 D4:0.5 E4:1 G4:0.5 E4:0.5 D4:2 E4:1 G4:0.5 E4:0.5 A3:1 C4:1 C4:2 G3:2 E4:1 G4:0.5 E4:0.5 D4:1 C4:0.5 D4:0.5 E4:1 G4:0.5 E4:0.5 C4:2 E4:1 G4:0.5 E4:0.5 D4:1 C4:1 C4:2 C4:2 E5:1 D5:0.5 C5:0.5 A4:1 B4:1 D5:2 [C6+D5]:2",lhTxt:"[G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [F3+C3]:2 [E3+C3]:2 [C3+B2]:2 [G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [F3+C3]:2 [E3+C3]:2 [E3+C2]:2 [A4+C4]:2 [D4+C4]:2 [E4+C4]:2 [G4+C4]:2",ties:[{h:"rh",from:28,to:30},{h:"lh",from:0,to:2},{h:"lh",from:2,to:4},{h:"lh",from:4,to:6},{h:"lh",from:6,to:8},{h:"lh",from:8,to:10},{h:"lh",from:10,to:12},{h:"lh",from:12,to:14},{h:"lh",from:14,to:16,side:"b"},{h:"lh",from:16,to:18},{h:"lh",from:18,to:20},{h:"lh",from:20,to:22},{h:"lh",from:22,to:24},{h:"lh",from:24,to:26},{h:"lh",from:26,to:28},{h:"lh",from:28,to:30},{h:"lh",from:32,to:34},{h:"lh",from:34,to:36}],forceStem:{lh:{"14":"down"}},fing:{rh:[[0,64,3],[3,60,1],[8,64,5],[16,64,3],[24,64,5],[32,76,5]],lh:[[0,55,2],[0,48,5],[8,55,1],[8,48,5],[16,55,2],[16,48,5],[24,55,1],[24,48,5],[32,69,1]]}},
+  {id:"bk-cradle",name:"A Cradle Song（Weybright · 照片三方校对版）",baked:true,dyn:[{b:0,t:"p"},{b:16,t:"mf"}],bts:2,rhTxt:"E4:1 G4:0.5 E4:0.5 D4:1 C4:0.5 D4:0.5 E4:1 G4:0.5 E4:0.5 D4:2 E4:1 G4:0.5 E4:0.5 A3:1 C4:1 C4:2 G3:2 E4:1 G4:0.5 E4:0.5 D4:1 C4:0.5 D4:0.5 E4:1 G4:0.5 E4:0.5 C4:2 E4:1 G4:0.5 E4:0.5 D4:1 C4:1 C4:2 C4:2 E5:1 D5:0.5 C5:0.5 A4:1 B4:1 D5:2 [C6+D5]:2",lhTxt:"[G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [F3+C3]:2 [E3+C3]:2 [C3+B2]:2 [G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [A3+C3]:2 [G3+C3]:2 [F3+C3]:2 [E3+C3]:2 [E3+C2]:2 [G4+C4]:2 [F4+C4]:2 [E4+C4]:2 [G4+C4]:2",ties:[{h:"rh",from:28,to:30},{h:"lh",from:0,to:2},{h:"lh",from:2,to:4},{h:"lh",from:4,to:6},{h:"lh",from:6,to:8},{h:"lh",from:8,to:10},{h:"lh",from:10,to:12},{h:"lh",from:12,to:14},{h:"lh",from:14,to:16,side:"b"},{h:"lh",from:16,to:18},{h:"lh",from:18,to:20},{h:"lh",from:20,to:22},{h:"lh",from:22,to:24},{h:"lh",from:24,to:26},{h:"lh",from:26,to:28},{h:"lh",from:28,to:30},{h:"lh",from:32,to:34},{h:"lh",from:34,to:36}],forceStem:{lh:{"14":"down"}},fing:{rh:[[0,64,3],[3,60,1],[8,64,5],[16,64,3],[24,64,5],[32,76,5]],lh:[[0,55,2],[0,48,5],[8,55,1],[8,48,5],[16,55,2],[16,48,5],[24,55,1],[24,48,5],[32,67,1]]},lhTrebleFrom:32},
   {id:"bk-echo",name:"Echo Song（Horak · 照片三方校对版）",baked:true,dyn:[{b:0,t:"f"},{b:7,t:"p"},{b:16,t:"f"},{b:23,t:"p"},{b:32,t:"pp"}],bts:4,key:{rh:["F#5"],lh:["F#3"]},rhTxt:"D5:1 D5:1 C5:1 A4:1 G4:2 R:1 A4:1 D5:1 D5:1 C5:1 A4:1 A4:2 R:1 G4:1 A4:1 A4:1 A4:1 A4:1 D5:1 D5:1 B4:1 G4:1 A4:1 A4:1 A4:1 A4:1 C5:1 C5:1 A4:2 C5:1 D5:1 C5:1 A4:1 G4:3 R:1",lhTxt:"G3:4 G3:1 B3:1 D4:1 R:1 G3:4 G3:1 B3:1 D4:1 R:1 C4:2 D4:2 B3:2 G3:2 C4:2 D4:2 B3:2 G3:2 G3:2 A3:2 B3:1 D4:1 G3:1 R:1",slurs:[{h:"rh",from:1,to:4,side:"a"},{h:"rh",from:7,to:8,side:"a"},{h:"rh",from:9,to:11,side:"a"},{h:"rh",from:15,to:16,side:"b"},{h:"rh",from:19,to:20,side:"b"},{h:"rh",from:23,to:24,side:"b"},{h:"rh",from:27,to:28,side:"b"},{h:"rh",from:33,to:35,side:"a"}],ties:[{h:"rh",from:11,to:12},{h:"lh",from:0,to:4},{h:"lh",from:8,to:12}],stacc:{rh:[8,32],lh:[]},fing:{rh:[[0,74,5],[7,69,3],[15,67,1],[32,72,5]],lh:[[0,55,5],[16,60,2],[32,55,5]]}},
   /* BAKED_SCORES */
 ];
@@ -2181,7 +2197,7 @@ function syncLibNav(){
 function loadLibEntry(en){
   if(!libStatusOf(en.rhTxt,en.lhTxt)){setStatus("《"+en.name+"》还没识谱：把这张照片发到我们对话里，我识谱做进页面后它就能选了。","bad");return;}
   try{
-    loadScore({rh:parseTextScore(en.rhTxt||""),lh:parseTextScore(en.lhTxt||""),slurs:en.slurs||[],ties:en.ties||[],stacc:en.stacc||null,bpm:en.bpm||null,bts:en.bts||null,key:en.key||null,fing:en.fing||null,forceAcc:en.forceAcc||null,dyn:en.dyn||null,forceStem:en.forceStem||null},"曲谱库《"+en.name+"》");
+    loadScore({rh:parseTextScore(en.rhTxt||""),lh:parseTextScore(en.lhTxt||""),slurs:en.slurs||[],ties:en.ties||[],stacc:en.stacc||null,bpm:en.bpm||null,bts:en.bts||null,key:en.key||null,fing:en.fing||null,forceAcc:en.forceAcc||null,dyn:en.dyn||null,forceStem:en.forceStem||null,lhTrebleFrom:(en.lhTrebleFrom!=null?en.lhTrebleFrom:null)},"曲谱库《"+en.name+"》");
     if(en.thumb){$("photoImg").src=en.thumb;$("photoImg").classList.remove("big");$("photoName").textContent=en.name;$("photoBox").style.display="block";$("photoConfirmMsg").textContent="正在演奏曲谱库里的《"+en.name+"》（照片是小图，点它才放大）。";}
     setStatus("✅ 已载入《"+en.name+"》：下面的五线谱已经换成这首了。点“♪ 试听”可以听，点“开始”可以弹。","ok");
   }catch(err){setStatus("载入失败："+err.message+"。把这个提示告诉我，我来修。","bad");}
